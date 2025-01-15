@@ -1,0 +1,27 @@
+version: '3.9'
+services:
+  postgres-prod:
+    image: postgres
+    container_name: postgres_prod
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_prod_data:/var/lib/postgresql/data
+
+  postgres-test:
+    image: postgres
+    container_name: postgres_test
+    environment:
+      POSTGRES_USER: test_user
+      POSTGRES_PASSWORD: test_password
+      POSTGRES_DB: test_db
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_prod_data:
+  postgres_test_data:
