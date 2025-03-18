@@ -26,7 +26,7 @@ func GetEvents(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid start_date format. Use RFC3339 (e.g., 2023-10-01T00:00:00Z)"})
 			return
 		}
-		query = query.Where("date_time >= ?", start)
+		query = query.Where("start_time >= ?", start)
 	}
 	if endDate != "" {
 		end, err := time.Parse(time.RFC3339, endDate)
@@ -34,7 +34,7 @@ func GetEvents(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid end_date format. Use RFC3339 (e.g., 2023-10-01T00:00:00Z)"})
 			return
 		}
-		query = query.Where("date_time <= ?", end)
+		query = query.Where("end_time <= ?", end)
 	}
 
 	// Apply limit
@@ -60,14 +60,14 @@ func GetEvents(c *gin.Context) {
 // CreateEvent creates a new event (requires admin permission)
 func CreateEvent(c *gin.Context) {
 	var input struct {
-		Name            string    `json:"name"`
-		Description     string    `json:"description"`
-		Location        string    `json:"location"`
-		StartTime       time.Time `json:"start_time"`
-		EndTime         time.Time `json:"end_time"`
-		PointsAllocation int      `json:"points_allocation"`
-		AwardIDs        []uint    `json:"award_ids"` // IDs of awards associated with the event
-		ImageURL        string    `json:"image_url"` // URL of the event image
+		Name            string     `json:"name"`
+		Description     string     `json:"description"`
+		Location        string     `json:"location"`
+		StartTime       *time.Time `json:"start_time"` // Pointer to time.Time
+		EndTime         *time.Time `json:"end_time"`   // Pointer to time.Time
+		PointsAllocation int       `json:"points_allocation"`
+		AwardIDs        []uint     `json:"award_ids"`
+		ImageURL        string     `json:"image_url"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -75,13 +75,15 @@ func CreateEvent(c *gin.Context) {
 	}
 
 	// Validate start and end times
-	if input.StartTime.IsZero() || input.EndTime.IsZero() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "start_time and end_time are required"})
+	if (input.StartTime == nil && input.EndTime != nil) || (input.StartTime != nil && input.EndTime == nil) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "start_time and end_time must both be nil or both have values"})
 		return
 	}
-	if input.StartTime.After(input.EndTime) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "start_time cannot be after end_time"})
-		return
+	if input.StartTime != nil && input.EndTime != nil {
+		if input.StartTime.After(*input.EndTime) || input.StartTime.Equal(*input.EndTime) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "start_time must be before end_time"})
+			return
+		}
 	}
 
 	// Get the organizer ID from the JWT token
@@ -99,8 +101,8 @@ func CreateEvent(c *gin.Context) {
 		Name:            input.Name,
 		Description:     input.Description,
 		Location:        input.Location,
-		StartTime:       input.StartTime,
-		EndTime:         input.EndTime,
+		StartTime:       input.StartTime, // Assign the pointer
+		EndTime:         input.EndTime,   // Assign the pointer
 		OrganizerID:     organizerID,
 		PointsAllocation: input.PointsAllocation,
 		ImageURL:        input.ImageURL,
@@ -129,14 +131,14 @@ func GetEvent(c *gin.Context) {
 func UpdateEvent(c *gin.Context) {
 	eventID := c.Param("eventId")
 	var input struct {
-		Name            string    `json:"name"`
-		Description     string    `json:"description"`
-		Location        string    `json:"location"`
-		StartTime       time.Time `json:"start_time"`
-		EndTime         time.Time `json:"end_time"`
+		Name            string     `json:"name"`
+		Description     string     `json:"description"`
+		Location        string     `json:"location"`
+		StartTime       *time.Time `json:"start_time"` // Pointer to time.Time
+		EndTime         *time.Time `json:"end_time"`   // Pointer to time.Time
 		PointsAllocation int      `json:"points_allocation"`
-		AwardIDs        []uint    `json:"award_ids"` // IDs of awards associated with the event
-		ImageURL        string    `json:"image_url"` // URL of the event image
+		AwardIDs        []uint    `json:"award_ids"`
+		ImageURL        string    `json:"image_url"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -144,9 +146,15 @@ func UpdateEvent(c *gin.Context) {
 	}
 
 	// Validate start and end times
-	if !input.StartTime.IsZero() && !input.EndTime.IsZero() && input.StartTime.After(input.EndTime) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "start_time cannot be after end_time"})
+	if (input.StartTime == nil && input.EndTime != nil) || (input.StartTime != nil && input.EndTime == nil) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "start_time and end_time must both be nil or both have values"})
 		return
+	}
+	if input.StartTime != nil && input.EndTime != nil {
+		if input.StartTime.After(*input.EndTime) || input.StartTime.Equal(*input.EndTime) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "start_time must be before end_time"})
+			return
+		}
 	}
 
 	// Fetch the event
@@ -167,11 +175,15 @@ func UpdateEvent(c *gin.Context) {
 	event.Name = input.Name
 	event.Description = input.Description
 	event.Location = input.Location
-	if !input.StartTime.IsZero() {
+	if input.StartTime != nil {
 		event.StartTime = input.StartTime
+	} else {
+		event.StartTime = nil // Explicitly set to nil if input.StartTime is nil
 	}
-	if !input.EndTime.IsZero() {
+	if input.EndTime != nil {
 		event.EndTime = input.EndTime
+	} else {
+		event.EndTime = nil // Explicitly set to nil if input.EndTime is nil
 	}
 	event.PointsAllocation = input.PointsAllocation
 	event.ImageURL = input.ImageURL
