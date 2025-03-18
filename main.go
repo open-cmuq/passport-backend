@@ -22,6 +22,7 @@ func main() {
   }
 
 	// Initialize Gin
+  gin.SetMode(gin.DebugMode)
 	router := gin.Default()
 
 	// Register routes
@@ -38,7 +39,7 @@ func main() {
   
 	// Start server
 	log.Println("Server running on :8080")
-	router.Run(":8080")
+	router.Run("0.0.0.0:8080")
 }
 
 

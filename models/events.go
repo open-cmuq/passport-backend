@@ -9,7 +9,8 @@ type Event struct {
 	Name            string    `gorm:"size:255;not null" json:"name"`
 	Description     string    `gorm:"type:text" json:"description"`
 	Location        string    `gorm:"size:255" json:"location"`
-	DateTime        time.Time `gorm:"not null" json:"date_time"`
+	startTime        time.Time `gorm:"not null" json:"start_time"`
+  endTime        time.Time `gorm:"not null" json:"end_time"`
 	OrganizerID     uint      `gorm:"not null" json:"organizer_id"` // ID of the user who organized the event
 	PointsAllocation int      `gorm:"default:0" json:"points_allocation"`
   ImageURL     string    `gorm:"size:512" json:"icon_url"`

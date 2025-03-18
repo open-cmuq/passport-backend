@@ -20,4 +20,16 @@ func SetupRoutes(router *gin.Engine) {
 		userRoutes.PUT("/:id",middleware.OwnershipMiddleware(), controllers.UpdateUser)
 		userRoutes.DELETE("/:id", middleware.AdminOnlyMiddleware(), controllers.DeleteUser)
 	}
+
+  // Event routes
+  // TODO enable the admin before production
+	eventRoutes := router.Group("/events")
+	eventRoutes.Use(middleware.AuthMiddleware())
+	{
+		eventRoutes.GET("/", controllers.GetEvents)
+		eventRoutes.POST("/", controllers.CreateEvent) 
+		eventRoutes.GET("/:eventId", controllers.GetEvent)
+		eventRoutes.PATCH("/:eventId", controllers.UpdateEvent)
+		eventRoutes.DELETE("/:eventId", controllers.DeleteEvent)
+	}
 }
