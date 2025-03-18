@@ -17,9 +17,9 @@ func main() {
   // Create ENUM types if they don't exist
 	createEnumTypes(database.DB)
 	// Auto-migrate models
-  if err := database.DB.AutoMigrate(&models.User{}, &models.Award{}); err != nil {
-		log.Fatalf("Failed to auto-migrate: %v", err)
-	}
+  if err := database.DB.AutoMigrate(&models.User{}, &models.Event{}, &models.Attendance{}, &models.Award{}); err != nil {
+    log.Fatalf("Failed to auto-migrate: %v", err)
+  }
 
 	// Initialize Gin
 	router := gin.Default()
