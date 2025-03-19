@@ -2,11 +2,17 @@
 The EcoCampus backend is a REST API service made using golang and utilizing
 postgresql for the database.
 
-# Setup
+# Dependencies
+- Docker
+- Golang >= 1.24.1
 
 # Running in production
 
 # Running in test
+```
+$ docker compose up postgres-test -d
+$ go run main.go
+```
 
 # Contributing
 Ecocampus Passport is open to contributions and if you're interested in working on this project
