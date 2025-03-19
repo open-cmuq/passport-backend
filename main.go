@@ -9,6 +9,7 @@ import (
   "gorm.io/gorm"
   "time"
 	"github.com/gin-gonic/gin"
+  "github.com/gin-contrib/cors"
 )
 
 func main() {
@@ -24,6 +25,22 @@ func main() {
 	// Initialize Gin
   gin.SetMode(gin.DebugMode)
 	router := gin.Default()
+
+  // Configure CORS based on the environment
+	if gin.Mode() == gin.DebugMode {
+    log.Println("AllowingAllOrigins Cors")
+		// Allow all origins, methods, and headers in debug mode
+		router.Use(cors.New(cors.Config{
+			AllowAllOrigins:  true, // Allow all origins
+			AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+			AllowHeaders:     []string{"*"}, // Allow all headers
+			ExposeHeaders:    []string{"Content-Length"},
+			AllowCredentials: true,
+		}))
+	} else {
+		// Use a more restrictive CORS policy in production
+		router.Use(cors.Default())
+	}
 
 	// Register routes
 	routes.SetupRoutes(router)

@@ -54,6 +54,15 @@ func GetEvents(c *gin.Context) {
 		return
 	}
 
+	userRole := c.GetString("user_role")
+
+	// If the user is not an admin or staff, remove attendance information from the events
+	if userRole != "admin" && userRole != "staff" {
+		for i := range events {
+		  events[i].Attendees = []models.Attendance{}
+		}
+	}
+
 	c.JSON(http.StatusOK, events)
 }
 
@@ -120,10 +129,22 @@ func CreateEvent(c *gin.Context) {
 func GetEvent(c *gin.Context) {
 	eventID := c.Param("eventId")
 	var event models.Event
-	if err := database.DB.Preload("Organizer").Preload("Awards").First(&event, eventID).Error; err != nil {
+
+	// Fetch the event with all relationships
+	if err := database.DB.Preload("Organizer").Preload("Awards").Preload("Attendees").First(&event, eventID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Event not found"})
 		return
 	}
+
+	// Get the user's role from the JWT token or session
+	userRole := c.GetString("user_role") // Assuming the role is stored in the JWT token as "user_role"
+
+	// Check if the user is an admin or staff
+	if userRole != "admin" && userRole != "staff" {
+		// If the user is not an admin or staff, return the event without attendance information
+		event.Attendees = []models.Attendance{}
+	}
+
 	c.JSON(http.StatusOK, event)
 }
 
