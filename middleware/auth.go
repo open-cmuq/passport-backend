@@ -18,10 +18,12 @@ func AuthMiddleware() gin.HandlerFunc {
 		}
 
 		tokenString = strings.TrimPrefix(tokenString, "Bearer ")
-		claims, err := utils.ValidateToken(tokenString)
-		if err != nil {
+		claims, err := utils.ValidateToken(tokenString, "access")
+    if err != nil {
 			if err.Error() == "token has expired" {
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "Token has expired"})
+			} else if err.Error() == "invalid token type" {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token type. Access token required"})
 			} else {
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
 			}

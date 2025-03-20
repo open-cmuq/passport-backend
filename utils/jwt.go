@@ -22,6 +22,7 @@ var jwtSecret = getJWTSecret()
 type Claims struct {
 	UserID uint   `json:"user_id"`
 	Role   string `json:"role"`
+  TokenType string `json:"token_type"`
 	jwt.RegisteredClaims
 }
 
@@ -30,6 +31,7 @@ func GenerateToken(userID uint, role string) (string, error) {
 	claims := Claims{
 		UserID: userID,
 		Role:   role,
+    TokenType: "access",
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(15 * time.Minute)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -42,10 +44,14 @@ func GenerateToken(userID uint, role string) (string, error) {
 
 // GenerateRefreshToken generates a refresh token
 func GenerateRefreshToken(userID uint) (string, time.Time, error) {
-	refreshTokenExp := time.Now().Add(7 * 24 * time.Hour) // Refresh token expires in 7 days
-	claims := jwt.MapClaims{
-		"user_id": userID,
-		"exp":     refreshTokenExp.Unix(),
+  refreshTokenExp := time.Now().Add(7 * 24 * time.Hour)
+  claims := Claims{
+		UserID: userID,
+    TokenType: "refresh",
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(refreshTokenExp),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	refreshToken, err := token.SignedString(jwtSecret)
@@ -57,7 +63,7 @@ func GenerateRefreshToken(userID uint) (string, time.Time, error) {
 
 
 // ValidateToken validates a JWT token
-func ValidateToken(tokenString string) (*Claims, error) {
+func ValidateToken(tokenString string, expectedTokenType string) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 		return jwtSecret, nil
 	})
@@ -69,6 +75,10 @@ func ValidateToken(tokenString string) (*Claims, error) {
 	}
 
 	if claims, ok := token.Claims.(*Claims); ok && token.Valid {
+		// Check the token type
+		if claims.TokenType != expectedTokenType {
+			return nil, errors.New("invalid token type")
+		}
 		return claims, nil
 	}
 

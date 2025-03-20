@@ -74,7 +74,6 @@ func Login(c *gin.Context) {
 		return
 	}
   
-  role := string(user.Role)
   // Generate access token
 	accessToken, err := utils.GenerateToken(user.ID, string(user.Role))
 	if err != nil {
@@ -172,15 +171,33 @@ func Register(c *gin.Context) {
 		return
 	}
 
-	// Generate a token for the user
-	role := string(user.Role)
-	token, err := utils.GenerateToken(user.ID, role)
+	// Generate access token
+	accessToken, err := utils.GenerateToken(user.ID, string(user.Role))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate access token"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"token": token})
+	// Generate refresh token
+	refreshToken, refreshTokenExp, err := utils.GenerateRefreshToken(user.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate refresh token"})
+		return
+	}
+
+  // Save the refresh token to the database
+	user.RefreshToken = refreshToken
+	user.RefreshTokenExp = refreshTokenExp
+	if err := database.DB.Save(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save refresh token"})
+		return
+	}
+
+	// Return the tokens
+	c.JSON(http.StatusOK, gin.H{
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
+	})
 }
 
 // RefreshToken handles access token refresh
@@ -194,7 +211,7 @@ func RefreshToken(c *gin.Context) {
 	}
 
 	// Validate the refresh token
-	claims, err := utils.ValidateToken(input.RefreshToken)
+	claims, err := utils.ValidateToken(input.RefreshToken, "refresh") // Only allow refresh tokens
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid refresh token"})
 		return
