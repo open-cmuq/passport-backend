@@ -28,6 +28,8 @@ type User struct {
 	Email            string         `gorm:"size:255;unique;not null" json:"email"`
 	Password         string         `gorm:"size:255" json:"-"` // Exclude password from JSON
 	GoogleID         string         `gorm:"size:255" json:"-"` // Exclude Google ID from JSON
+  RefreshToken     string         `gorm:"size:512" json:"-"` // Refresh token
+	RefreshTokenExp  time.Time      `json:"-"`                // Refresh token expiration time
 	GradYear         int            `gorm:"not null" json:"grad_year"`
 	CurrentPoints    int            `gorm:"default:0" json:"current_points"`
 	AwardsEarned     []Award        `gorm:"many2many:user_badges" json:"badges"` // Many-to-many relationship

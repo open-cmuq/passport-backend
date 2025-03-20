@@ -75,13 +75,33 @@ func Login(c *gin.Context) {
 	}
   
   role := string(user.Role)
-	token, err := utils.GenerateToken(user.ID, role)
+  // Generate access token
+	accessToken, err := utils.GenerateToken(user.ID, string(user.Role))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate access token"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"token": token})
+	// Generate refresh token
+	refreshToken, refreshTokenExp, err := utils.GenerateRefreshToken(user.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate refresh token"})
+		return
+	}
+
+  // Save the refresh token to the database
+	user.RefreshToken = refreshToken
+	user.RefreshTokenExp = refreshTokenExp
+	if err := database.DB.Save(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save refresh token"})
+		return
+	}
+
+	// Return the tokens
+	c.JSON(http.StatusOK, gin.H{
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
+	})
 }
 
 
@@ -161,4 +181,47 @@ func Register(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"token": token})
+}
+
+// RefreshToken handles access token refresh
+func RefreshToken(c *gin.Context) {
+	var input struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Validate the refresh token
+	claims, err := utils.ValidateToken(input.RefreshToken)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid refresh token"})
+		return
+	}
+
+	// Find the user
+	var user models.User
+	if err := database.DB.Where("id = ?", claims.UserID).First(&user).Error; err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not found"})
+		return
+	}
+
+	// Check if the refresh token matches and is not expired
+	if user.RefreshToken != input.RefreshToken || time.Now().After(user.RefreshTokenExp) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired refresh token"})
+		return
+	}
+
+	// Generate a new access token
+	accessToken, err := utils.GenerateToken(user.ID, string(user.Role))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate access token"})
+		return
+	}
+
+	// Return the new access token
+	c.JSON(http.StatusOK, gin.H{
+		"access_token": accessToken,
+	})
 }
