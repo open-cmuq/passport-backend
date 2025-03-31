@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/open-cmuq/passport-backend/models"
 	"github.com/open-cmuq/passport-backend/utils"
+  "fmt"
 )
 
 
@@ -49,31 +50,6 @@ func VerifyOTP(c *gin.Context) {
 	// Remove the user from the pending registrations cache
 	utils.DeletePendingUser(input.Email)
 
-	c.JSON(http.StatusOK, gin.H{"message": "OTP verified successfully. User registered."})
-}
-
-// Login handles password-based login
-func Login(c *gin.Context) {
-	var input struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	}
-	if err := c.ShouldBindJSON(&input); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	var user models.User
-	if err := database.DB.Where("email = ?", input.Email).First(&user).Error; err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
-		return
-	}
-
-	if !user.CheckPassword(input.Password) {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
-		return
-	}
-  
   // Generate access token
 	accessToken, err := utils.GenerateToken(user.ID, string(user.Role))
 	if err != nil {
@@ -103,6 +79,65 @@ func Login(c *gin.Context) {
 	})
 }
 
+// Login handles password-based login
+func Login(c *gin.Context) {
+    var input struct {
+        Email    string `json:"email"`
+        Password string `json:"password"`
+    }
+    if err := c.ShouldBindJSON(&input); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+        return
+    }
+
+    var user models.User
+    if err := database.DB.Where("email = ?", input.Email).First(&user).Error; err != nil {
+        c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
+        return
+    }
+
+    if !user.CheckPassword(input.Password) {
+        c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
+        return
+    }
+    
+    // Generate access token
+    accessToken, err := utils.GenerateToken(user.ID, string(user.Role))
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate access token"})
+        return
+    }
+
+    var refreshToken string
+    var refreshTokenExp time.Time
+
+    // Check if existing refresh token is still valid
+    if user.RefreshToken != "" && user.RefreshTokenExp.After(time.Now()) {
+        refreshToken = user.RefreshToken
+        refreshTokenExp = user.RefreshTokenExp
+    } else {
+        // Generate new refresh token if none exists or it's expired
+        refreshToken, refreshTokenExp, err = utils.GenerateRefreshToken(user.ID)
+        if err != nil {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate refresh token"})
+            return
+        }
+
+        // Save the new refresh token to the database
+        user.RefreshToken = refreshToken
+        user.RefreshTokenExp = refreshTokenExp
+        if err := database.DB.Save(&user).Error; err != nil {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save refresh token"})
+            return
+        }
+    }
+
+    // Return the tokens
+    c.JSON(http.StatusOK, gin.H{
+        "access_token":  accessToken,
+        "refresh_token": refreshToken,
+    })
+}
 
 // Register handles user registration
 func Register(c *gin.Context) {
@@ -216,7 +251,7 @@ func RefreshToken(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid refresh token"})
 		return
 	}
-
+  
 	// Find the user
 	var user models.User
 	if err := database.DB.Where("id = ?", claims.UserID).First(&user).Error; err != nil {
@@ -226,6 +261,7 @@ func RefreshToken(c *gin.Context) {
 
 	// Check if the refresh token matches and is not expired
 	if user.RefreshToken != input.RefreshToken || time.Now().After(user.RefreshTokenExp) {
+    fmt.Print(time.Now())
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired refresh token"})
 		return
 	}

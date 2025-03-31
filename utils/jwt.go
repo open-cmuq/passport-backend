@@ -5,6 +5,7 @@ import (
   "os"
   "errors"
 	"github.com/golang-jwt/jwt/v5"
+  _ "github.com/joho/godotenv/autoload"
 )
 
 // Get JWT secret key from environment instead

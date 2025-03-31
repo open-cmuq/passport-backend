@@ -27,6 +27,7 @@ type User struct {
 	Name             string         `gorm:"size:255;not null" json:"name"`
 	Email            string         `gorm:"size:255;unique;not null" json:"email"`
 	Password         string         `gorm:"size:255" json:"-"` // Exclude password from JSON
+  PhotoURL         string         `gorm:"size:512" json:"photo_url"`
 	GoogleID         string         `gorm:"size:255" json:"-"` // Exclude Google ID from JSON
   RefreshToken     string         `gorm:"size:512" json:"-"` // Refresh token
 	RefreshTokenExp  time.Time      `json:"-"`                // Refresh token expiration time
