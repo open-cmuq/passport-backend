@@ -2,38 +2,39 @@ package main
 
 import (
 	"log"
+	"time"
+
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 	"github.com/open-cmuq/passport-backend/database"
 	"github.com/open-cmuq/passport-backend/models"
 	"github.com/open-cmuq/passport-backend/routes"
-  "github.com/open-cmuq/passport-backend/utils"
-  "gorm.io/gorm"
-  "time"
-	"github.com/gin-gonic/gin"
-  "github.com/gin-contrib/cors"
-  "github.com/joho/godotenv"
+	"github.com/open-cmuq/passport-backend/utils"
+	"gorm.io/gorm"
 )
 
 func main() {
-  // Load environment variables from .env file
+	// Load environment variables from .env file
 	if err := godotenv.Load(".env"); err != nil {
 		log.Fatal("Error loading .env file")
 	}
 	// Connect to database
 	database.Connect()
-  // Create ENUM types if they don't exist
+	// Create ENUM types if they don't exist
 	createEnumTypes(database.DB)
 	// Auto-migrate models
-  if err := database.DB.AutoMigrate(&models.User{}, &models.Event{}, &models.Attendance{}, &models.Award{}); err != nil {
-    log.Fatalf("Failed to auto-migrate: %v", err)
-  }
+	if err := database.DB.AutoMigrate(&models.User{}, &models.Event{}, &models.Attendance{}, &models.Award{}); err != nil {
+		log.Fatalf("Failed to auto-migrate: %v", err)
+	}
 
 	// Initialize Gin
-  gin.SetMode(gin.DebugMode)
+	gin.SetMode(gin.DebugMode)
 	router := gin.Default()
 
-  // Configure CORS based on the environment
+	// Configure CORS based on the environment
 	if gin.Mode() == gin.DebugMode {
-    log.Println("AllowingAllOrigins Cors")
+		log.Println("AllowingAllOrigins Cors")
 		// Allow all origins, methods, and headers in debug mode
 		router.Use(cors.New(cors.Config{
 			AllowAllOrigins:  true, // Allow all origins
@@ -50,7 +51,7 @@ func main() {
 	// Register routes
 	routes.SetupRoutes(router)
 
-  // Start the background cleanup task
+	// Start the background cleanup task
 	go func() {
 		for {
 			time.Sleep(5 * time.Minute) // Run every 5 minutes
@@ -58,12 +59,11 @@ func main() {
 			log.Println("Cleaned up expired pending registrations")
 		}
 	}()
-  
+
 	// Start server
 	log.Println("Server running on :8080")
 	router.Run("0.0.0.0:8080")
 }
-
 
 func createEnumTypes(db *gorm.DB) {
 	// Create user_status ENUM type

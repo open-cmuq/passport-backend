@@ -27,3 +27,6 @@ When contributing please follow [Commit Message Guidlines](https://gist.github.c
 If you find a security bug please disclose it immediately to helpcenter@qatar.cmu.edu and talhah@cmu.edu along
 with how to reproduce it. You are not allowed to disclose the bug to other parties
 until we give you clearance.
+
+# License 
+This project is licensed under the [MIT License](LICENSE).
