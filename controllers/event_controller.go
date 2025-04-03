@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/open-cmuq/passport-backend/database"
 	"github.com/open-cmuq/passport-backend/models"
+	"gorm.io/gorm"
 )
 
 // GetEvents retrieves a list of all events with optional filters
@@ -111,14 +112,6 @@ func GetEvents(c *gin.Context) {
 		return
 	}
 
-	// Filter attendance information based on user role
-	userRole := c.GetString("user_role")
-	if userRole != "admin" && userRole != "staff" {
-		for i := range events {
-			events[i].Attendees = []models.Attendance{}
-		}
-	}
-
 	c.JSON(http.StatusOK, events)
 }
 
@@ -192,15 +185,7 @@ func GetEvent(c *gin.Context) {
 		return
 	}
 
-	// Get the user's role from the JWT token or session
-	userRole := c.GetString("user_role") // Assuming the role is stored in the JWT token as "user_role"
-
-	// Check if the user is an admin or staff
-	if userRole != "admin" && userRole != "staff" {
-		// If the user is not an admin or staff, return the event without attendance information
-		event.Attendees = []models.Attendance{}
-	}
-
+	// TODO Consider sharing the event information as the user gets the event
 	c.JSON(http.StatusOK, event)
 }
 
@@ -277,9 +262,297 @@ func UpdateEvent(c *gin.Context) {
 // DeleteEvent deletes an event (requires admin permission)
 func DeleteEvent(c *gin.Context) {
 	eventID := c.Param("eventId")
-	if err := database.DB.Delete(&models.Event{}, eventID).Error; err != nil {
+
+	tx := database.DB.Begin()
+
+	// 1. Get event points allocation
+	var event models.Event
+	if err := tx.First(&event, eventID).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusNotFound, gin.H{"error": "Event not found"})
+		return
+	}
+
+	// 2. Get all attendance records
+	var attendances []models.Attendance
+	if err := tx.Where("event_id = ?", eventID).Find(&attendances).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to find attendances"})
+		return
+	}
+
+	// 3. Collect user IDs and deduct points
+	userIDs := make([]uint, 0, len(attendances))
+	for _, a := range attendances {
+		userIDs = append(userIDs, a.UserID)
+	}
+
+	if len(userIDs) > 0 {
+		if err := tx.Model(&models.User{}).Where("id IN ?", userIDs).
+			Update("current_points", gorm.Expr("current_points - ?", event.PointsAllocation)).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to deduct points"})
+			return
+		}
+	}
+
+	// 4. Delete attendances
+	if err := tx.Where("event_id = ?", eventID).Delete(&models.Attendance{}).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete attendances"})
+		return
+	}
+
+	// 5. Delete event
+	if err := tx.Delete(&models.Event{}, eventID).Error; err != nil {
+		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete event"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "Event deleted"})
+
+	tx.Commit()
+	c.JSON(http.StatusOK, gin.H{"message": "Event and related data deleted"})
+}
+
+// GetEventAttendees returns basic user info for event attendees
+func GetEventAttendees(c *gin.Context) {
+	eventID := c.Param("eventId")
+
+	var attendees []struct {
+		ID       uint   `json:"id"`
+		Name     string `json:"name"`
+		Email    string `json:"email"`
+		PhotoURL string `json:"photo_url"`
+	}
+
+	err := database.DB.Table("attendances").
+		Select("users.id, users.name, users.email, users.photo_url").
+		Joins("JOIN users ON users.id = attendances.user_id").
+		Where("attendances.event_id = ?", eventID).
+		Scan(&attendees).Error
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve attendees"})
+		return
+	}
+
+	c.JSON(http.StatusOK, attendees)
+}
+
+// AddAttendances handles adding attendance by user ID or email (supports bulk)
+func AddAttendances(c *gin.Context) {
+	eventID := c.Param("eventId")
+	var input struct {
+		Identifiers []string `json:"identifiers"` // Can be user IDs or emails
+	}
+
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request format"})
+		return
+	}
+
+	// Get the event first to check points allocation
+	var event models.Event
+	if err := database.DB.First(&event, eventID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Event not found"})
+		return
+	}
+
+	// Resolve identifiers to valid user IDs
+	resolvedUsers, invalidIdentifiers := resolveValidIdentifiers(input.Identifiers)
+	if len(resolvedUsers) == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"message":             "No valid users found",
+			"invalid_identifiers": invalidIdentifiers,
+		})
+		return
+	}
+
+	// Extract just the user IDs for processing
+	userIDs := make([]uint, 0, len(resolvedUsers))
+	for _, user := range resolvedUsers {
+		userIDs = append(userIDs, user.ID)
+	}
+
+	// Process in transaction
+	tx := database.DB.Begin()
+	var newCount, duplicateCount int
+	processedUsers := make([]uint, 0)
+
+	for _, userID := range userIDs {
+		// Check existing attendance
+		var existing models.Attendance
+		if err := tx.Where("user_id = ? AND event_id = ?", userID, eventID).First(&existing).Error; err == nil {
+			duplicateCount++
+			continue
+		}
+
+		// Create attendance record
+		attendance := models.Attendance{
+			UserID:      userID,
+			EventID:     event.ID,
+			ScannedTime: time.Now(),
+		}
+
+		if err := tx.Create(&attendance).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create attendance"})
+			return
+		}
+
+		// Update user points
+		if err := tx.Model(&models.User{}).Where("id = ?", userID).
+			Update("current_points", gorm.Expr("current_points + ?", event.PointsAllocation)).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update user points"})
+			return
+		}
+
+		newCount++
+		processedUsers = append(processedUsers, userID)
+	}
+
+	tx.Commit()
+
+	// Get details of processed users for response
+	var users []models.User
+	database.DB.Where("id IN ?", processedUsers).Find(&users)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":             "Attendance processed",
+		"new_attendees":       newCount,
+		"duplicates":          duplicateCount,
+		"points_added":        event.PointsAllocation * newCount,
+		"processed_users":     users,
+		"invalid_identifiers": invalidIdentifiers,
+	})
+}
+
+// DeleteAttendances handles removing attendance by user ID or email (supports bulk)
+func DeleteAttendances(c *gin.Context) {
+	eventID := c.Param("eventId")
+	var input struct {
+		Identifiers []string `json:"identifiers"` // Can be user IDs or emails
+	}
+
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request format"})
+		return
+	}
+
+	// Get the event first to check points allocation
+	var event models.Event
+	if err := database.DB.First(&event, eventID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Event not found"})
+		return
+	}
+
+	// Resolve identifiers to valid user IDs
+	resolvedUsers, invalidIdentifiers := resolveValidIdentifiers(input.Identifiers)
+	if len(resolvedUsers) == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"message":             "No valid users found",
+			"invalid_identifiers": invalidIdentifiers,
+		})
+		return
+	}
+
+	// Extract just the user IDs for processing
+	userIDs := make([]uint, 0, len(resolvedUsers))
+	for _, user := range resolvedUsers {
+		userIDs = append(userIDs, user.ID)
+	}
+
+	// Process in transaction
+	tx := database.DB.Begin()
+
+	// Delete attendances
+	result := tx.Where("event_id = ? AND user_id IN ?", eventID, userIDs).
+		Delete(&models.Attendance{})
+	if result.Error != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete attendances"})
+		return
+	}
+
+	// Deduct points from users
+	if err := tx.Model(&models.User{}).Where("id IN ?", userIDs).
+		Update("current_points", gorm.Expr("current_points - ?", event.PointsAllocation)).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to deduct points"})
+		return
+	}
+
+	tx.Commit()
+
+	// Get details of processed users for response
+	var users []models.User
+	database.DB.Where("id IN ?", userIDs).Find(&users)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":             "Attendance removed",
+		"removed_count":       result.RowsAffected,
+		"points_deducted":     event.PointsAllocation * int(result.RowsAffected),
+		"processed_users":     users,
+		"invalid_identifiers": invalidIdentifiers,
+	})
+}
+
+// Helper function to resolve mixed identifiers (IDs or emails) to valid user records
+func resolveValidIdentifiers(identifiers []string) ([]models.User, []string) {
+	var users []models.User
+	var invalidIdentifiers []string
+
+	// Separate numeric IDs and emails
+	var potentialIDs []uint
+	var emails []string
+
+	for _, identifier := range identifiers {
+		if id, err := strconv.Atoi(identifier); err == nil {
+			potentialIDs = append(potentialIDs, uint(id))
+		} else {
+			emails = append(emails, identifier)
+		}
+	}
+
+	// Find users by ID
+	if len(potentialIDs) > 0 {
+		var idUsers []models.User
+		if err := database.DB.Where("id IN ?", potentialIDs).Find(&idUsers).Error; err == nil {
+			users = append(users, idUsers...)
+
+			// Track which IDs weren't found
+			foundIDs := make(map[uint]bool)
+			for _, user := range idUsers {
+				foundIDs[user.ID] = true
+			}
+
+			for _, id := range potentialIDs {
+				if !foundIDs[id] {
+					invalidIdentifiers = append(invalidIdentifiers, fmt.Sprintf("%d", id))
+				}
+			}
+		}
+	}
+
+	// Find users by email
+	if len(emails) > 0 {
+		var emailUsers []models.User
+		if err := database.DB.Where("email IN ?", emails).Find(&emailUsers).Error; err == nil {
+			users = append(users, emailUsers...)
+
+			// Track which emails weren't found
+			foundEmails := make(map[string]bool)
+			for _, user := range emailUsers {
+				foundEmails[user.Email] = true
+			}
+
+			for _, email := range emails {
+				if !foundEmails[email] {
+					invalidIdentifiers = append(invalidIdentifiers, email)
+				}
+			}
+		}
+	}
+
+	return users, invalidIdentifiers
 }

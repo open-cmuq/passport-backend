@@ -32,5 +32,8 @@ func SetupRoutes(router *gin.Engine) {
 		eventRoutes.GET("/:eventId", controllers.GetEvent)
 		eventRoutes.PATCH("/:eventId", controllers.UpdateEvent)
 		eventRoutes.DELETE("/:eventId", controllers.DeleteEvent)
+		eventRoutes.GET("/:eventId/attendees", controllers.GetEventAttendees)
+		eventRoutes.POST("/:eventId/attendances", controllers.AddAttendances)
+		eventRoutes.DELETE("/:eventId/attendances", controllers.DeleteAttendances)
 	}
 }
