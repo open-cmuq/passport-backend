@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"net/http"
+
 	"github.com/open-cmuq/passport-backend/database"
 	"github.com/open-cmuq/passport-backend/models"
 
@@ -35,27 +36,38 @@ func UpdateUser(c *gin.Context) {
 		return
 	}
 
-	// Bind the updated data
+	// Define input struct with optional fields (pointers)
 	var input struct {
-		Name     string `json:"name"`
-		Email    string `json:"email"`
-		GradYear int    `json:"grad_year"`
-		Title    string `json:"title"`
-		Biography string `json:"biography"`
+		Name       *string `json:"name"`
+		GradYear   *int    `json:"grad_year"`
+		Title      *string `json:"title"`
+		Biography  *string `json:"biography"`
+		Department *string `json:"department"`
 	}
+
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Update the user's information
-	user.Name = input.Name
-	user.Email = input.Email
-	user.GradYear = input.GradYear
-	user.Title = input.Title
-	user.Biography = input.Biography
+	// Update only provided fields
+	if input.Name != nil {
+		user.Name = *input.Name
+	}
+	if input.GradYear != nil {
+		user.GradYear = *input.GradYear
+	}
+	if input.Title != nil {
+		user.Title = *input.Title
+	}
+	if input.Biography != nil {
+		user.Biography = *input.Biography
+	}
+	if input.Department != nil {
+		user.Department = *input.Department
+	}
 
-	// Save the updated user
+	// Save updates
 	if err := database.DB.Save(&user).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update user"})
 		return
