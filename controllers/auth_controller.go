@@ -1,16 +1,16 @@
 package controllers
 
 import (
+	"fmt"
 	"net/http"
-  "regexp"
-  "time"
-  "github.com/open-cmuq/passport-backend/database"
+	"regexp"
+	"time"
+
 	"github.com/gin-gonic/gin"
+	"github.com/open-cmuq/passport-backend/database"
 	"github.com/open-cmuq/passport-backend/models"
 	"github.com/open-cmuq/passport-backend/utils"
-  "fmt"
 )
-
 
 // VerifyOTP handles OTP verification
 func VerifyOTP(c *gin.Context) {
@@ -36,21 +36,26 @@ func VerifyOTP(c *gin.Context) {
 		return
 	}
 
-	// Create the user in the database
+	// Start a transaction
+	tx := database.DB.Begin()
+	if tx.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
+		return
+	}
+
+	// Create user within the transaction
 	user := models.User{
-		Name:         pendingUser.Name,
-		Email:        pendingUser.Email,
+		Name:     pendingUser.Name,
+		Email:    pendingUser.Email,
 		Password: pendingUser.PasswordHash,
 	}
-	if err := database.DB.Create(&user).Error; err != nil {
+	if err := tx.Create(&user).Error; err != nil {
+		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user"})
 		return
 	}
 
-	// Remove the user from the pending registrations cache
-	utils.DeletePendingUser(input.Email)
-
-  // Generate access token
+	// Generate access token
 	accessToken, err := utils.GenerateToken(user.ID, string(user.Role))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate access token"})
@@ -64,13 +69,22 @@ func VerifyOTP(c *gin.Context) {
 		return
 	}
 
-  // Save the refresh token to the database
+	// Save the refresh token to the database
 	user.RefreshToken = refreshToken
 	user.RefreshTokenExp = refreshTokenExp
-	if err := database.DB.Save(&user).Error; err != nil {
+	if err := tx.Save(&user).Error; err != nil {
+		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save refresh token"})
 		return
 	}
+
+	// Commit the transaction
+	if err := tx.Commit().Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction"})
+		return
+	}
+	// Remove the user from the pending registrations cache
+	utils.DeletePendingUser(input.Email)
 
 	// Return the tokens
 	c.JSON(http.StatusOK, gin.H{
@@ -81,62 +95,62 @@ func VerifyOTP(c *gin.Context) {
 
 // Login handles password-based login
 func Login(c *gin.Context) {
-    var input struct {
-        Email    string `json:"email"`
-        Password string `json:"password"`
-    }
-    if err := c.ShouldBindJSON(&input); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-        return
-    }
+	var input struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
-    var user models.User
-    if err := database.DB.Where("email = ?", input.Email).First(&user).Error; err != nil {
-        c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
-        return
-    }
+	var user models.User
+	if err := database.DB.Where("email = ?", input.Email).First(&user).Error; err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
+		return
+	}
 
-    if !user.CheckPassword(input.Password) {
-        c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
-        return
-    }
-    
-    // Generate access token
-    accessToken, err := utils.GenerateToken(user.ID, string(user.Role))
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate access token"})
-        return
-    }
+	if !user.CheckPassword(input.Password) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
+		return
+	}
 
-    var refreshToken string
-    var refreshTokenExp time.Time
+	// Generate access token
+	accessToken, err := utils.GenerateToken(user.ID, string(user.Role))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate access token"})
+		return
+	}
 
-    // Check if existing refresh token is still valid
-    if user.RefreshToken != "" && user.RefreshTokenExp.After(time.Now()) {
-        refreshToken = user.RefreshToken
-        refreshTokenExp = user.RefreshTokenExp
-    } else {
-        // Generate new refresh token if none exists or it's expired
-        refreshToken, refreshTokenExp, err = utils.GenerateRefreshToken(user.ID)
-        if err != nil {
-            c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate refresh token"})
-            return
-        }
+	var refreshToken string
+	var refreshTokenExp time.Time
 
-        // Save the new refresh token to the database
-        user.RefreshToken = refreshToken
-        user.RefreshTokenExp = refreshTokenExp
-        if err := database.DB.Save(&user).Error; err != nil {
-            c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save refresh token"})
-            return
-        }
-    }
+	// Check if existing refresh token is still valid
+	if user.RefreshToken != "" && user.RefreshTokenExp.After(time.Now()) {
+		refreshToken = user.RefreshToken
+		refreshTokenExp = user.RefreshTokenExp
+	} else {
+		// Generate new refresh token if none exists or it's expired
+		refreshToken, refreshTokenExp, err = utils.GenerateRefreshToken(user.ID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate refresh token"})
+			return
+		}
 
-    // Return the tokens
-    c.JSON(http.StatusOK, gin.H{
-        "access_token":  accessToken,
-        "refresh_token": refreshToken,
-    })
+		// Save the new refresh token to the database
+		user.RefreshToken = refreshToken
+		user.RefreshTokenExp = refreshTokenExp
+		if err := database.DB.Save(&user).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save refresh token"})
+			return
+		}
+	}
+
+	// Return the tokens
+	c.JSON(http.StatusOK, gin.H{
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
+	})
 }
 
 // Register handles user registration
@@ -198,10 +212,17 @@ func Register(c *gin.Context) {
 		return
 	}
 
+	tx := database.DB.Begin()
+	if tx.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
+		return
+	}
+
 	// In development mode, directly create the user
 	user.Name = input.Name
 	user.Email = input.Email
-	if err := database.DB.Create(&user).Error; err != nil {
+	if err := tx.Create(&user).Error; err != nil {
+		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user"})
 		return
 	}
@@ -220,13 +241,16 @@ func Register(c *gin.Context) {
 		return
 	}
 
-  // Save the refresh token to the database
+	// Save the refresh token to the database
 	user.RefreshToken = refreshToken
 	user.RefreshTokenExp = refreshTokenExp
-	if err := database.DB.Save(&user).Error; err != nil {
+	if err := tx.Save(&user).Error; err != nil {
+		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save refresh token"})
 		return
 	}
+
+	tx.Commit()
 
 	// Return the tokens
 	c.JSON(http.StatusOK, gin.H{
@@ -251,7 +275,7 @@ func RefreshToken(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid refresh token"})
 		return
 	}
-  
+
 	// Find the user
 	var user models.User
 	if err := database.DB.Where("id = ?", claims.UserID).First(&user).Error; err != nil {
@@ -261,7 +285,7 @@ func RefreshToken(c *gin.Context) {
 
 	// Check if the refresh token matches and is not expired
 	if user.RefreshToken != input.RefreshToken || time.Now().After(user.RefreshTokenExp) {
-    fmt.Print(time.Now())
+		fmt.Print(time.Now())
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired refresh token"})
 		return
 	}
