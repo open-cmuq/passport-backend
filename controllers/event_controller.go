@@ -124,7 +124,7 @@ func CreateEvent(c *gin.Context) {
 		StartTime        *time.Time `json:"start_time"` // Pointer to time.Time
 		EndTime          *time.Time `json:"end_time"`   // Pointer to time.Time
 		PointsAllocation int        `json:"points_allocation"`
-		AwardIDs         []uint     `json:"award_ids"`
+		AwardIDs         *[]uint    `json:"award_ids"`
 		ImageURL         string     `json:"image_url"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -149,9 +149,11 @@ func CreateEvent(c *gin.Context) {
 
 	// Fetch the awards
 	var awards []models.Award
-	if err := database.DB.Where("id IN ?", input.AwardIDs).Find(&awards).Error; err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid award IDs"})
-		return
+	if input.AwardIDs != nil { // Only process if awards were specified
+		if err := database.DB.Where("id IN ?", *input.AwardIDs).Find(&awards).Error; err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid award IDs"})
+			return
+		}
 	}
 
 	// Create the event
@@ -175,6 +177,8 @@ func CreateEvent(c *gin.Context) {
 }
 
 // GetEvent retrieves details of a specific event
+// TODO Consider the case where we have 1000s of events, this would lead to blocking the API and slow performance.
+// however, this is sufficient for our current needs
 func GetEvent(c *gin.Context) {
 	eventID := c.Param("eventId")
 	var event models.Event
@@ -196,12 +200,13 @@ func UpdateEvent(c *gin.Context) {
 		Name             string     `json:"name"`
 		Description      string     `json:"description"`
 		Location         string     `json:"location"`
-		StartTime        *time.Time `json:"start_time"` // Pointer to time.Time
-		EndTime          *time.Time `json:"end_time"`   // Pointer to time.Time
+		StartTime        *time.Time `json:"start_time"`
+		EndTime          *time.Time `json:"end_time"`
 		PointsAllocation int        `json:"points_allocation"`
 		AwardIDs         []uint     `json:"award_ids"`
 		ImageURL         string     `json:"image_url"`
 	}
+
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -219,40 +224,69 @@ func UpdateEvent(c *gin.Context) {
 		}
 	}
 
-	// Fetch the event
+	// Start a transaction
+	tx := database.DB.Begin()
+	if tx.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
+		return
+	}
+
+	// Defer rollback in case of failure
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+			panic(r) // re-throw panic after Rollback
+		}
+	}()
+
+	// Fetch the event within transaction
 	var event models.Event
-	if err := database.DB.First(&event, eventID).Error; err != nil {
+	if err := tx.First(&event, eventID).Error; err != nil {
+		tx.Rollback()
 		c.JSON(http.StatusNotFound, gin.H{"error": "Event not found"})
 		return
 	}
 
-	// Fetch the awards
+	// Fetch the awards within transaction if award IDs are provided
 	var awards []models.Award
-	if err := database.DB.Where("id IN ?", input.AwardIDs).Find(&awards).Error; err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid award IDs"})
-		return
+	if len(input.AwardIDs) > 0 {
+		if err := tx.Where("id IN ?", input.AwardIDs).Find(&awards).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid award IDs"})
+			return
+		}
+		// Verify we found all requested awards
+		if len(awards) != len(input.AwardIDs) {
+			tx.Rollback()
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Some award IDs not found"})
+			return
+		}
 	}
 
 	// Update the event
 	event.Name = input.Name
 	event.Description = input.Description
 	event.Location = input.Location
-	if input.StartTime != nil {
-		event.StartTime = input.StartTime
-	} else {
-		event.StartTime = nil // Explicitly set to nil if input.StartTime is nil
-	}
-	if input.EndTime != nil {
-		event.EndTime = input.EndTime
-	} else {
-		event.EndTime = nil // Explicitly set to nil if input.EndTime is nil
-	}
+	event.StartTime = input.StartTime // nil or value both handled
+	event.EndTime = input.EndTime     // nil or value both handled
 	event.PointsAllocation = input.PointsAllocation
 	event.ImageURL = input.ImageURL
-	event.Awards = awards
 
-	if err := database.DB.Save(&event).Error; err != nil {
+	// Only update awards if new ones were provided
+	if len(input.AwardIDs) > 0 {
+		event.Awards = awards
+	}
+
+	// Save within transaction
+	if err := tx.Save(&event).Error; err != nil {
+		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update event"})
+		return
+	}
+
+	// Commit the transaction
+	if err := tx.Commit().Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction"})
 		return
 	}
 
@@ -375,53 +409,80 @@ func AddAttendances(c *gin.Context) {
 
 	// Process in transaction
 	tx := database.DB.Begin()
-	var newCount, duplicateCount int
-	processedUsers := make([]uint, 0)
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// 1. Find existing attendances to avoid duplicates
+	var existingAttendances []models.Attendance
+	if err := tx.Where("user_id IN ? AND event_id = ?", userIDs, eventID).Find(&existingAttendances).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check existing attendances"})
+		return
+	}
+
+	// Create set of existing user IDs for quick lookup
+	existingUsers := make(map[uint]bool)
+	for _, att := range existingAttendances {
+		existingUsers[att.UserID] = true
+	}
+
+	// Prepare batch insert
+	var newAttendances []models.Attendance
+	var usersToUpdate []uint
+	now := time.Now()
 
 	for _, userID := range userIDs {
-		// Check existing attendance
-		var existing models.Attendance
-		if err := tx.Where("user_id = ? AND event_id = ?", userID, eventID).First(&existing).Error; err == nil {
-			duplicateCount++
+		if existingUsers[userID] {
 			continue
 		}
 
-		// Create attendance record
-		attendance := models.Attendance{
+		newAttendances = append(newAttendances, models.Attendance{
 			UserID:      userID,
 			EventID:     event.ID,
-			ScannedTime: time.Now(),
-		}
+			ScannedTime: now,
+		})
+		usersToUpdate = append(usersToUpdate, userID)
+	}
 
-		if err := tx.Create(&attendance).Error; err != nil {
+	// 2. Batch insert new attendances
+	if len(newAttendances) > 0 {
+		if err := tx.CreateInBatches(newAttendances, 100).Error; err != nil {
 			tx.Rollback()
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create attendance"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create attendances"})
 			return
 		}
+	}
 
-		// Update user points
-		if err := tx.Model(&models.User{}).Where("id = ?", userID).
+	// 3. Batch update user points
+	if len(usersToUpdate) > 0 {
+		if err := tx.Model(&models.User{}).
+			Where("id IN ?", usersToUpdate).
 			Update("current_points", gorm.Expr("current_points + ?", event.PointsAllocation)).Error; err != nil {
 			tx.Rollback()
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update user points"})
 			return
 		}
-
-		newCount++
-		processedUsers = append(processedUsers, userID)
 	}
 
-	tx.Commit()
+	if err := tx.Commit().Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction"})
+		return
+	}
 
 	// Get details of processed users for response
 	var users []models.User
-	database.DB.Where("id IN ?", processedUsers).Find(&users)
+	if len(usersToUpdate) > 0 {
+		database.DB.Where("id IN ?", usersToUpdate).Find(&users)
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":             "Attendance processed",
-		"new_attendees":       newCount,
-		"duplicates":          duplicateCount,
-		"points_added":        event.PointsAllocation * newCount,
+		"new_attendees":       len(newAttendances),
+		"duplicates":          len(userIDs) - len(newAttendances),
+		"points_added":        event.PointsAllocation * len(newAttendances),
 		"processed_users":     users,
 		"invalid_identifiers": invalidIdentifiers,
 	})
