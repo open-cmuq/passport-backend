@@ -467,6 +467,29 @@ func AddAttendances(c *gin.Context) {
 		}
 	}
 
+	// 4. Grant new awards to users who qualify after point update
+	var newAwardsGranted int64 = 0
+	if len(usersToUpdate) > 0 {
+		// Execute raw SQL to insert qualifying awards, avoid adding duplicates
+		result := tx.Exec(`
+			INSERT INTO user_badges (user_id, award_id, created_at, updated_at)
+			SELECT u.id, a.id, ?, ?
+			FROM users u
+			CROSS JOIN awards a
+			LEFT JOIN user_badges ub ON ub.user_id = u.id AND ub.award_id = a.id
+			WHERE u.id IN (?)
+			  AND a.points <= u.current_points
+			  AND ub.user_id IS NULL
+		`, now, now, usersToUpdate)
+
+		if result.Error != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to grant awards"})
+			return
+		}
+		newAwardsGranted = result.RowsAffected
+	}
+
 	if err := tx.Commit().Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction"})
 		return
@@ -475,7 +498,7 @@ func AddAttendances(c *gin.Context) {
 	// Get details of processed users for response
 	var users []models.User
 	if len(usersToUpdate) > 0 {
-		database.DB.Where("id IN ?", usersToUpdate).Find(&users)
+		database.DB.Preload("AwardsEarned").Where("id IN ?", usersToUpdate).Find(&users)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -483,6 +506,7 @@ func AddAttendances(c *gin.Context) {
 		"new_attendees":       len(newAttendances),
 		"duplicates":          len(userIDs) - len(newAttendances),
 		"points_added":        event.PointsAllocation * len(newAttendances),
+		"new_awards_granted":  newAwardsGranted,
 		"processed_users":     users,
 		"invalid_identifiers": invalidIdentifiers,
 	})
