@@ -6,49 +6,119 @@ import (
 )
 
 var (
+	// Pending registrations for new users
 	pendingRegistrations = make(map[string]PendingUser) // Key: email, Value: PendingUser
-	mu                   sync.RWMutex                  // Mutex to handle concurrent access
+	muRegistrations      sync.RWMutex                   // Mutex for pending registrations
+
+	// Pending password resets for existing users
+	pendingResets = make(map[string]PendingReset) // Key: email, Value: PendingReset
+	muResets      sync.RWMutex                    // Mutex for pending resets
 )
 
-// PendingUser represents a user waiting for OTP verification
+// PendingUser represents a user waiting for OTP verification during registration
 type PendingUser struct {
-	Name         string
-	Email        string
-	PasswordHash string
-	OTP          string
-	OTPExpiresAt time.Time
+	Name         string    // User's name
+	Email        string    // User's email
+	PasswordHash string    // Hashed password
+	OTP          string    // One-time password
+	OTPExpiresAt time.Time // When the OTP expires
+	LastOTPSent  time.Time // When the last OTP was sent
+	Attempts     int       // Number of OTP attempts
+	CreatedAt    time.Time // When the registration was initiated
 }
 
-// AddPendingUser adds a user to the pending registrations cache
+// PendingReset represents a password reset request waiting for OTP verification
+type PendingReset struct {
+	Email        string    // User's email
+	OTP          string    // One-time password
+	OTPExpiresAt time.Time // When the OTP expires
+	LastOTPSent  time.Time // When the last OTP was sent
+	Attempts     int       // Number of OTP attempts
+	CreatedAt    time.Time // When the reset was initiated
+}
+
+// Registration Functions
 func AddPendingUser(email string, user PendingUser) {
-	mu.Lock()
-	defer mu.Unlock()
+	muRegistrations.Lock()
+	defer muRegistrations.Unlock()
 	pendingRegistrations[email] = user
 }
 
-// GetPendingUser retrieves a user from the pending registrations cache
 func GetPendingUser(email string) (PendingUser, bool) {
-	mu.RLock()
-	defer mu.RUnlock()
+	muRegistrations.RLock()
+	defer muRegistrations.RUnlock()
 	user, exists := pendingRegistrations[email]
 	return user, exists
 }
 
-// DeletePendingUser removes a user from the pending registrations cache
 func DeletePendingUser(email string) {
-	mu.Lock()
-	defer mu.Unlock()
+	muRegistrations.Lock()
+	defer muRegistrations.Unlock()
 	delete(pendingRegistrations, email)
 }
 
-// CleanupExpiredRegistrations removes expired pending registrations from the cache
+func IncrementPendingUserAttempts(email string) {
+	muRegistrations.Lock()
+	defer muRegistrations.Unlock()
+	if user, exists := pendingRegistrations[email]; exists {
+		user.Attempts++
+		pendingRegistrations[email] = user
+	}
+}
+
+// Reset Functions
+func AddPendingReset(email string, reset PendingReset) {
+	muResets.Lock()
+	defer muResets.Unlock()
+	pendingResets[email] = reset
+}
+
+func GetPendingReset(email string) (PendingReset, bool) {
+	muResets.RLock()
+	defer muResets.RUnlock()
+	reset, exists := pendingResets[email]
+	return reset, exists
+}
+
+func DeletePendingReset(email string) {
+	muResets.Lock()
+	defer muResets.Unlock()
+	delete(pendingResets, email)
+}
+
+func IncrementPendingResetAttempts(email string) {
+	muResets.Lock()
+	defer muResets.Unlock()
+	if reset, exists := pendingResets[email]; exists {
+		reset.Attempts++
+		pendingResets[email] = reset
+	}
+}
+
+// Cleanup Functions
 func CleanupExpiredRegistrations() {
-	mu.Lock()
-	defer mu.Unlock()
+	muRegistrations.Lock()
+	defer muRegistrations.Unlock()
 	now := time.Now()
 	for email, user := range pendingRegistrations {
 		if now.After(user.OTPExpiresAt) {
 			delete(pendingRegistrations, email)
 		}
 	}
+}
+
+func CleanupExpiredResets() {
+	muResets.Lock()
+	defer muResets.Unlock()
+	now := time.Now()
+	for email, reset := range pendingResets {
+		if now.After(reset.OTPExpiresAt) {
+			delete(pendingResets, email)
+		}
+	}
+}
+
+func CleanupExpiredCache() {
+	CleanupExpiredRegistrations()
+	CleanupExpiredResets()
 }

@@ -12,6 +12,225 @@ import (
 	"github.com/open-cmuq/passport-backend/utils"
 )
 
+// ResendOTP handles OTP resend requests
+func ResendOTP(c *gin.Context) {
+	var input struct {
+		Email string `json:"email" binding:"required,email"`
+	}
+
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid email format"})
+		return
+	}
+
+	// Get pending user with read lock
+	pendingUser, exists := utils.GetPendingUser(input.Email)
+	if !exists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "No pending registration found"})
+		return
+	}
+
+	// Check cooldown period (30 seconds)
+	if time.Since(pendingUser.LastOTPSent) < 30*time.Second {
+		remaining := 30*time.Second - time.Since(pendingUser.LastOTPSent)
+		c.JSON(http.StatusTooManyRequests, gin.H{
+			"error":       "Please wait before requesting a new OTP",
+			"retry_after": remaining.Seconds(),
+		})
+		return
+	}
+
+	// Generate new OTP
+	newOTP := utils.GenerateOTP()
+	newExpiration := time.Now().Add(10 * time.Minute)
+
+	// Update pending user with write lock
+	updatedUser := utils.PendingUser{
+		Name:         pendingUser.Name,
+		Email:        pendingUser.Email,
+		PasswordHash: pendingUser.PasswordHash,
+		OTP:          newOTP,
+		OTPExpiresAt: newExpiration,
+		LastOTPSent:  time.Now(),
+		Attempts:     pendingUser.Attempts,
+		CreatedAt:    pendingUser.CreatedAt,
+	}
+
+	utils.AddPendingUser(input.Email, updatedUser)
+
+	// In production, implement actual email sending here
+	go func(email, otp string) {
+		fmt.Printf("Sent new OTP to %s: %s\n", email, otp)
+	}(input.Email, newOTP)
+
+	c.JSON(http.StatusOK, gin.H{"message": "New OTP sent successfully"})
+}
+
+// ForgotPassword handles password reset requests
+func ForgotPassword(c *gin.Context) {
+	var input struct {
+		Email string `json:"email" binding:"required,email"`
+	}
+
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid email format"})
+		return
+	}
+
+	// Check if user exists (without revealing existence)
+	var user models.User
+	if err := database.DB.Where("email = ?", input.Email).First(&user).Error; err != nil {
+		// Return success even if email doesn't exist to prevent email enumeration
+		c.JSON(http.StatusOK, gin.H{"message": "If the email exists, OTP has been sent"})
+		return
+	}
+
+	// Check existing reset request with read lock
+	existingReset, exists := utils.GetPendingReset(input.Email)
+
+	// Check cooldown if exists
+	if exists && time.Since(existingReset.LastOTPSent) < 30*time.Second {
+		remaining := 30*time.Second - time.Since(existingReset.LastOTPSent)
+		c.JSON(http.StatusTooManyRequests, gin.H{
+			"error":       "Please wait before requesting a new OTP",
+			"retry_after": remaining.Seconds(),
+		})
+		return
+	}
+
+	// Generate new OTP
+	newOTP := utils.GenerateOTP()
+	expiration := time.Now().Add(10 * time.Minute)
+
+	// Create or update reset request with write lock
+	newReset := utils.PendingReset{
+		Email:        input.Email,
+		OTP:          newOTP,
+		OTPExpiresAt: expiration,
+		LastOTPSent:  time.Now(),
+		Attempts:     0,
+		CreatedAt:    time.Now(),
+	}
+
+	utils.AddPendingReset(input.Email, newReset)
+
+	// In production, implement actual email sending here
+	go func(email, otp string) {
+		fmt.Printf("Sent password reset OTP to %s: %s\n", email, otp)
+	}(input.Email, newOTP)
+
+	c.JSON(http.StatusOK, gin.H{"message": "OTP sent for password reset"})
+}
+
+// ResetPassword handles password reset confirmation with proper locking
+func ResetPassword(c *gin.Context) {
+	var input struct {
+		Email    string `json:"email" binding:"required,email"`
+		OTP      string `json:"otp" binding:"required,len=6"`
+		Password string `json:"password" binding:"required,min=8"`
+	}
+
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Get pending reset with read lock
+	pendingReset, exists := utils.GetPendingReset(input.Email)
+	if !exists || pendingReset.OTP != input.OTP {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid OTP"})
+		return
+	}
+
+	// Check OTP expiration
+	if time.Now().After(pendingReset.OTPExpiresAt) {
+		utils.DeletePendingReset(input.Email)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "OTP has expired"})
+		return
+	}
+
+	// Find user
+	var user models.User
+	if err := database.DB.Where("email = ?", input.Email).First(&user).Error; err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+
+	// Update password
+	if err := user.HashPassword(input.Password); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process password"})
+		return
+	}
+
+	// Invalidate all existing sessions
+	user.RefreshToken = ""
+	user.RefreshTokenExp = time.Now()
+	if err := database.DB.Save(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset password"})
+		return
+	}
+
+	// Clear pending reset with write lock
+	utils.DeletePendingReset(input.Email)
+
+	c.JSON(http.StatusOK, gin.H{"message": "Password reset successful"})
+}
+
+// ChangePassword handles password changes with proper validation
+func ChangePassword(c *gin.Context) {
+	var input struct {
+		OldPassword string `json:"old_password" binding:"required"`
+		NewPassword string `json:"new_password" binding:"required,min=8"`
+	}
+
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Get user from context (set by auth middleware)
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	// Fetch current user
+	var user models.User
+	if err := database.DB.First(&user, userID).Error; err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not found"})
+		return
+	}
+
+	// Verify old password
+	if !user.CheckPassword(input.OldPassword) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid current password"})
+		return
+	}
+
+	// Check if new password is different
+	if user.CheckPassword(input.NewPassword) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "New password must be different"})
+		return
+	}
+
+	// Update password
+	if err := user.HashPassword(input.NewPassword); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process password"})
+		return
+	}
+
+	// Invalidate all existing sessions
+	user.RefreshToken = ""
+	user.RefreshTokenExp = time.Now()
+	if err := database.DB.Save(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update password"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Password changed successfully"})
+}
+
 // VerifyOTP handles OTP verification
 func VerifyOTP(c *gin.Context) {
 	var input struct {
@@ -198,6 +417,8 @@ func Register(c *gin.Context) {
 			PasswordHash: user.Password,
 			OTP:          otp,
 			OTPExpiresAt: otpExpiresAt,
+			LastOTPSent:  time.Now(),
+			Attempts:     0,
 		}
 		utils.AddPendingUser(input.Email, pendingUser)
 
