@@ -11,6 +11,10 @@ func SetupRoutes(router *gin.Engine) {
 	router.POST("/register", controllers.Register)
 	router.POST("/verify-otp", controllers.VerifyOTP)
 	router.POST("/refresh-token", controllers.RefreshToken)
+	router.POST("/resend-otp", controllers.ResendOTP)
+	router.POST("/forgot-password", controllers.ForgotPassword)
+	router.POST("/reset-password", controllers.ResetPassword)
+	router.POST("/change-password", middleware.AuthMiddleware(), controllers.ChangePassword)
 
 	userRoutes := router.Group("/users")
 	userRoutes.Use(middleware.AuthMiddleware())
