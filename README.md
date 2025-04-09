@@ -9,6 +9,8 @@ postgresql for the database.
 # Running in production
 
 # Running in test
+- Configure variables in .env, see .env.example for an idea on what to define
+
 ```
 $ docker compose up postgres-test -d
 $ go run main.go
